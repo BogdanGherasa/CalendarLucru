@@ -1,0 +1,17 @@
+﻿@page
+@model ErrorModel
+@{
+    ViewData["Title"] = "Eroare";
+}
+
+<h1 class="h3 text-danger">A apărut o eroare.</h1>
+<p>Cererea nu a putut fi procesată. Încearcă din nou mai târziu.</p>
+
+@if (Model.ShowRequestId)
+{
+    <p class="small text-body-secondary">
+        <strong>ID cerere:</strong> <code>@Model.RequestId</code>
+    </p>
+}
+
+<a asp-page="/Index" class="btn btn-primary">Înapoi la pagina principală</a>

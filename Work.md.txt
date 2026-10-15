@@ -1,0 +1,398 @@
+# SPEC: Time-Blocker & Notes — v1.0 (MVP)
+
+## 0. Stack tehnologic
+
+| Strat | Tehnologie | Versiune |
+|---|---|---|
+| Runtime | .NET | 10 (LTS) |
+| Backend | ASP.NET Core: Razor Pages (pagini) + Minimal API (JSON pentru CRUD) | 10.0.x |
+| Autentificare | ASP.NET Core Identity, cookie auth, pagini proprii (fără pachetul Identity.UI) | 10.0.x |
+| ORM | Entity Framework Core | 10.0.x |
+| Bază de date | SQLite (`App_Data/timeblocker.db`) | — |
+| Frontend | HTML5 (Razor), CSS3, Bootstrap 5.3.x (CDN jsDelivr + `integrity`), JavaScript vanilla (ES modules) | — |
+| Teste | xUnit + SQLite in-memory | — |
+
+### Presupuneri (decise de arhitect, modificabile)
+- P1: Orele sunt stocate ca oră locală (`DateOnly` + `TimeOnly`), fără conversie de fus orar. Ziua curentă este determinată de browser și trimisă explicit ca `?date=YYYY-MM-DD`.
+- P2: Un time-block nu poate trece de miezul nopții (`EndTime > StartTime`, aceeași zi).
+- P3: Suprapunerile de intervale pentru același utilizator și aceeași zi sunt RESPINSE (HTTP 409).
+- P4: Fără confirmare email și fără resetare parolă în v1.0.
+- P5: „Timp real” = operațiile CRUD actualizează timeline-ul fără reîncărcarea paginii (fetch + re-randare). Fără WebSockets/SignalR.
+
+## 1. Structura directoarelor
+
+```
+TimeBlocker/
+├── TimeBlocker.sln
+├── .gitignore
+├── README.md
+├── src/
+│   └── TimeBlocker.Web/
+│       ├── TimeBlocker.Web.csproj
+│       ├── Program.cs
+│       ├── appsettings.json
+│       ├── appsettings.Development.json
+│       ├── App_Data/                      # creat la runtime, ignorat în git
+│       ├── Models/
+│       │   ├── ApplicationUser.cs
+│       │   └── TimeBlock.cs
+│       ├── Data/
+│       │   ├── AppDbContext.cs
+│       │   └── Migrations/                # generat de dotnet ef
+│       ├── Dtos/
+│       │   └── TimeBlockDtos.cs
+│       ├── Validation/
+│       │   └── TimeBlockValidator.cs
+│       ├── Services/
+│       │   ├── ITimeBlockService.cs
+│       │   ├── TimeBlockService.cs
+│       │   └── ServiceResult.cs
+│       ├── Endpoints/
+│       │   ├── TimeBlockEndpoints.cs
+│       │   └── AntiforgeryValidationFilter.cs
+│       ├── Pages/
+│       │   ├── _ViewImports.cshtml
+│       │   ├── _ViewStart.cshtml
+│       │   ├── Shared/
+│       │   │   └── _Layout.cshtml
+│       │   ├── Index.cshtml
+│       │   ├── Index.cshtml.cs
+│       │   └── Account/
+│       │       ├── Register.cshtml
+│       │       ├── Register.cshtml.cs
+│       │       ├── Login.cshtml
+│       │       ├── Login.cshtml.cs
+│       │       ├── Logout.cshtml
+│       │       └── Logout.cshtml.cs
+│       └── wwwroot/
+│           ├── css/
+│           │   └── site.css
+│           └── js/
+│               ├── api.js
+│               ├── timeline.js
+│               ├── modal.js
+│               └── dashboard.js
+└── tests/
+    └── TimeBlocker.Tests/
+        ├── TimeBlocker.Tests.csproj
+        ├── TestDbFactory.cs
+        ├── TimeBlockValidatorTests.cs
+        └── TimeBlockServiceTests.cs
+```
+
+## 2. Task-uri
+
+Ordinea de execuție este obligatorie. Fiecare task se consideră finalizat doar când `dotnet build` trece fără erori.
+
+---
+
+### T01 — Scaffolding soluție
+**Fișiere:** `TimeBlocker.sln`, `src/TimeBlocker.Web/TimeBlocker.Web.csproj`, `tests/TimeBlocker.Tests/TimeBlocker.Tests.csproj`, `.gitignore`
+
+**Dependențe (NuGet) — `TimeBlocker.Web`:**
+- `Microsoft.AspNetCore.Identity.EntityFrameworkCore` 10.0.x
+- `Microsoft.EntityFrameworkCore.Sqlite` 10.0.x
+- `Microsoft.EntityFrameworkCore.Design` 10.0.x (PrivateAssets=all)
+
+**Dependențe — `TimeBlocker.Tests`:**
+- `xunit`, `xunit.runner.visualstudio`, `Microsoft.NET.Test.Sdk`
+- `Microsoft.EntityFrameworkCore.Sqlite` 10.0.x
+- ProjectReference către `TimeBlocker.Web`
+
+**Logică:**
+- Template: `dotnet new webapp` (Razor Pages), fără autentificare implicită.
+- `<Nullable>enable</Nullable>`, `<ImplicitUsings>enable</ImplicitUsings>`, `<TargetFramework>net10.0</TargetFramework>`.
+- `.gitignore`: standard .NET + `App_Data/`, `*.db`, `*.db-shm`, `*.db-wal`.
+- Instalare tool: `dotnet tool install --global dotnet-ef`.
+
+---
+
+### T02 — Modele de domeniu
+**Fișiere:** `src/TimeBlocker.Web/Models/ApplicationUser.cs`, `src/TimeBlocker.Web/Models/TimeBlock.cs`
+
+**Logică:**
+- `ApplicationUser : IdentityUser` — fără câmpuri extra în v1.0; proprietate de navigare `ICollection<TimeBlock> TimeBlocks`.
+- `TimeBlock`:
+  - `int Id` (PK)
+  - `string UserId` (FK obligatoriu către `ApplicationUser`)
+  - `string Title` (obligatoriu, 1–120 caractere după trim)
+  - `DateOnly Date`
+  - `TimeOnly StartTime`
+  - `TimeOnly EndTime`
+  - `string? Notes` (max 5000 caractere)
+  - `DateTime CreatedAtUtc`, `DateTime UpdatedAtUtc`
+  - Navigare `ApplicationUser User`
+
+---
+
+### T03 — DbContext și migrare inițială
+**Fișiere:** `src/TimeBlocker.Web/Data/AppDbContext.cs`, `src/TimeBlocker.Web/Data/Migrations/*`
+
+**Dependențe:** T02
+
+**Logică:**
+- `AppDbContext : IdentityDbContext<ApplicationUser>`; `DbSet<TimeBlock> TimeBlocks`.
+- `OnModelCreating` (apelează întâi `base.OnModelCreating`):
+  - `Title` → `HasMaxLength(120)`, `IsRequired()`.
+  - `Notes` → `HasMaxLength(5000)`.
+  - Relație `User` 1–N `TimeBlocks`, `OnDelete(DeleteBehavior.Cascade)`.
+  - Index compus `(UserId, Date, StartTime)`.
+- Override `SaveChangesAsync`: setează `CreatedAtUtc` la Added și `UpdatedAtUtc` la Added/Modified cu `DateTime.UtcNow`.
+- Migrare: `dotnet ef migrations add InitialCreate -o Data/Migrations`.
+
+---
+
+### T04 — Configurare aplicație
+**Fișiere:** `src/TimeBlocker.Web/Program.cs`, `src/TimeBlocker.Web/appsettings.json`, `src/TimeBlocker.Web/appsettings.Development.json`
+
+**Dependențe:** T03, T07, T08 (înregistrările pot fi adăugate incremental)
+
+**Logică:**
+- Connection string `DefaultConnection`: `Data Source=App_Data/timeblocker.db`. La pornire, creează directorul `App_Data` dacă nu există (cale relativă la `ContentRootPath`).
+- `AddDbContext<AppDbContext>(UseSqlite)`.
+- `AddIdentity<ApplicationUser, IdentityRole>().AddEntityFrameworkStores<AppDbContext>().AddDefaultTokenProviders()`.
+- Politică parolă: minim 8 caractere, cel puțin o cifră, o literă mică, o literă mare; `RequireNonAlphanumeric = false`.
+- Lockout: 5 încercări eșuate → blocare 5 minute; `AllowedForNewUsers = true`.
+- `User.RequireUniqueEmail = true`; `SignIn.RequireConfirmedAccount = false` (P4).
+- Cookie: `LoginPath=/Account/Login`, `LogoutPath=/Account/Logout`, `HttpOnly=true`, `SecurePolicy=Always`, `SameSite=Lax`, `ExpireTimeSpan=14 zile`, `SlidingExpiration=true`.
+- Eveniment `OnRedirectToLogin` / `OnRedirectToAccessDenied`: dacă path-ul începe cu `/api`, răspunde 401 / 403 în loc de redirect.
+- `AddRazorPages(o => o.Conventions.AuthorizeFolder("/").AllowAnonymousToFolder("/Account"))`.
+- `AddAntiforgery(o => o.HeaderName = "X-CSRF-TOKEN")`.
+- DI: `AddScoped<ITimeBlockService, TimeBlockService>()`.
+- Pipeline: `UseHttpsRedirection`, `UseStaticFiles`, `UseRouting`, `UseAuthentication`, `UseAuthorization`, `MapRazorPages`, `MapTimeBlockEndpoints()`.
+- În Development: `Database.Migrate()` la pornire într-un scope. În Production: `UseExceptionHandler("/Error")` + `UseHsts()`.
+
+---
+
+### T05 — DTO-uri
+**Fișiere:** `src/TimeBlocker.Web/Dtos/TimeBlockDtos.cs`
+
+**Dependențe:** T02
+
+**Logică (record-uri imutabile):**
+- `TimeBlockUpsertDto(string Title, string Date, string StartTime, string EndTime, string? Notes)` — date ca stringuri: `Date` format `yyyy-MM-dd`, ore format `HH:mm`.
+- `TimeBlockResponseDto(int Id, string Title, string Date, string StartTime, string EndTime, string? Notes, DateTime UpdatedAtUtc)`.
+- Metodă statică de mapare `TimeBlock → TimeBlockResponseDto`. `UserId` NU este expus niciodată.
+
+---
+
+### T06 — Validare
+**Fișiere:** `src/TimeBlocker.Web/Validation/TimeBlockValidator.cs`
+
+**Dependențe:** T05
+
+**Logică:**
+- Clasă statică, metodă `Validate(TimeBlockUpsertDto dto, out ParsedTimeBlock parsed)` → returnează `Dictionary<string, string[]>` cu erori (format compatibil `Results.ValidationProblem`).
+- Reguli:
+  - `Title`: trim; obligatoriu; 1–120 caractere.
+  - `Date`: parsare exactă `yyyy-MM-dd` cu `CultureInfo.InvariantCulture`.
+  - `StartTime`, `EndTime`: parsare exactă `HH:mm`; minute permise doar multipli de 5.
+  - `EndTime > StartTime` (P2). Durată minimă 5 minute.
+  - `Notes`: opțional; trim; string gol → `null`; max 5000 caractere.
+- `ParsedTimeBlock`: record intern cu tipurile tari (`DateOnly`, `TimeOnly`) și titlul/notițele normalizate.
+- Cheile erorilor: numele câmpurilor în camelCase (`title`, `date`, `startTime`, `endTime`, `notes`).
+
+---
+
+### T07 — Serviciu de business
+**Fișiere:** `src/TimeBlocker.Web/Services/ITimeBlockService.cs`, `src/TimeBlocker.Web/Services/TimeBlockService.cs`, `src/TimeBlocker.Web/Services/ServiceResult.cs`
+
+**Dependențe:** T03, T06
+
+**Logică:**
+- `ServiceResult<T>`: stare `Success | NotFound | Conflict | Invalid`, payload `T?`, erori `Dictionary<string,string[]>?`.
+- Toate metodele primesc explicit `string userId`; TOATE interogările filtrează după `UserId` (izolare între utilizatori).
+- Metode:
+  - `GetByDateAsync(userId, DateOnly date)` → listă sortată după `StartTime`, `AsNoTracking`.
+  - `GetByIdAsync(userId, id)` → `NotFound` dacă nu există SAU aparține altui utilizator (nu se distinge, anti-enumerare).
+  - `CreateAsync(userId, ParsedTimeBlock)` → verifică suprapunere; `Conflict` dacă există.
+  - `UpdateAsync(userId, id, ParsedTimeBlock)` → `NotFound` / verifică suprapunere excluzând propriul `Id` / salvează.
+  - `DeleteAsync(userId, id)` → `NotFound` sau șterge.
+- Regula de suprapunere (P3): există alt block al aceluiași user, aceeași `Date`, cu `existing.StartTime < new.EndTime && existing.EndTime > new.StartTime`. Capetele care se ating (10:00–11:00 și 11:00–12:00) NU sunt suprapunere.
+- Mesaj de conflict: include titlul și intervalul block-ului cu care se suprapune.
+
+---
+
+### T08 — API REST
+**Fișiere:** `src/TimeBlocker.Web/Endpoints/TimeBlockEndpoints.cs`, `src/TimeBlocker.Web/Endpoints/AntiforgeryValidationFilter.cs`
+
+**Dependențe:** T07
+
+**Logică:**
+- Metodă de extensie `MapTimeBlockEndpoints(this IEndpointRouteBuilder)`; grup `/api/timeblocks`, `.RequireAuthorization()`.
+- `userId` se obține exclusiv din `UserManager.GetUserId(ClaimsPrincipal)`; niciodată din body/query.
+- Rute:
+
+| Metodă | Rută | Succes | Erori |
+|---|---|---|---|
+| GET | `/api/timeblocks?date=yyyy-MM-dd` | 200 + `TimeBlockResponseDto[]` | 400 dacă `date` lipsește/invalid |
+| GET | `/api/timeblocks/{id:int}` | 200 + `TimeBlockResponseDto` | 404 |
+| POST | `/api/timeblocks` | 201 + `Location` + DTO | 400 (ValidationProblem), 409 |
+| PUT | `/api/timeblocks/{id:int}` | 200 + DTO | 400, 404, 409 |
+| DELETE | `/api/timeblocks/{id:int}` | 204 | 404 |
+
+- 409 returnat ca `ProblemDetails` cu `detail` = mesajul de conflict.
+- `AntiforgeryValidationFilter : IEndpointFilter`: pentru POST/PUT/DELETE apelează `IAntiforgery.ValidateRequestAsync`; la eșec → 400. Aplicat pe grup. (Necesar deoarece autentificarea e pe cookie și body-ul este JSON, nu formular.)
+
+---
+
+### T09 — Layout comun
+**Fișiere:** `src/TimeBlocker.Web/Pages/Shared/_Layout.cshtml`, `src/TimeBlocker.Web/Pages/_ViewImports.cshtml`, `src/TimeBlocker.Web/Pages/_ViewStart.cshtml`
+
+**Dependențe:** T04
+
+**Logică:**
+- `<html lang="ro">`, meta `viewport` pentru mobil.
+- Bootstrap 5.3.x CSS + JS bundle din CDN jsDelivr, cu `integrity` și `crossorigin="anonymous"`.
+- Navbar: nume aplicație; dacă autentificat → email utilizator + buton „Deconectare” (form POST către `/Account/Logout` cu antiforgery); altfel → linkuri „Autentificare” / „Înregistrare”.
+- `@RenderSection("Scripts", required: false)` la finalul `body`.
+- `_ViewImports`: `@using TimeBlocker.Web`, `@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers`, `@inject SignInManager<ApplicationUser>`.
+
+---
+
+### T10 — Pagini de autentificare
+**Fișiere:** `src/TimeBlocker.Web/Pages/Account/Register.cshtml(.cs)`, `Login.cshtml(.cs)`, `Logout.cshtml(.cs)`
+
+**Dependențe:** T04, T09
+
+**Logică:**
+- **Register:** câmpuri `Email`, `Password`, `ConfirmPassword` cu DataAnnotations (`[Required]`, `[EmailAddress]`, `[Compare]`). `UserName = Email`. Succes → `SignInAsync(isPersistent:false)` → redirect `/`. Erorile Identity se adaugă în `ModelState` și se afișează în română.
+- **Login:** câmpuri `Email`, `Password`, `RememberMe`. `PasswordSignInAsync(lockoutOnFailure:true)`. Mesaj generic la eșec („Email sau parolă incorecte”). Mesaj distinct la lockout. Respectă `returnUrl` doar dacă `Url.IsLocalUrl` (anti open-redirect).
+- **Logout:** doar POST; `SignOutAsync` → redirect `/Account/Login`. GET → redirect `/`.
+- Utilizator deja autentificat care accesează Login/Register → redirect `/`.
+- Formulare Bootstrap, validare client prin `_ValidationScriptsPartial` (jQuery Validation) SAU doar server-side — server-side este obligatorie.
+
+---
+
+### T11 — Dashboard (pagina principală)
+**Fișiere:** `src/TimeBlocker.Web/Pages/Index.cshtml`, `src/TimeBlocker.Web/Pages/Index.cshtml.cs`
+
+**Dependențe:** T09, T10
+
+**Logică:**
+- `[Authorize]` (prin convenția de folder din T04).
+- PageModel nu încarcă date; datele vin prin API (P5).
+- Markup:
+  - Bara de navigare a zilei: buton „‹” (ziua anterioară), eticheta datei (ex: „Joi, 15 octombrie 2026”), buton „Azi”, buton „›”.
+  - Container timeline `#timeline` cu 24 rânduri orare (00:00–23:00).
+  - Buton vizibil „Adaugă interval” (în bara de sus pe desktop; buton flotant fix dreapta-jos pe mobil < 768px).
+  - Modal Bootstrap `#blockModal` cu formular: `title` (input), `date` (input date), `startTime`, `endTime` (input time, `step=300`), `notes` (textarea, 6 rânduri), zonă de erori, butoane „Salvează”, „Anulează”, „Șterge” (vizibil doar în editare).
+  - Panou de vizualizare a notițelor în modal (mod citire) cu linkuri clickabile.
+- Token antiforgery randat într-un `<meta name="csrf-token" content="@Antiforgery.GetAndStoreTokens(HttpContext).RequestToken">`.
+- `@section Scripts { <script type="module" src="~/js/dashboard.js" asp-append-version="true"></script> }`.
+
+---
+
+### T12 — Client API (JS)
+**Fișiere:** `src/TimeBlocker.Web/wwwroot/js/api.js`
+
+**Dependențe:** T08
+
+**Logică:**
+- ES module; exportă `list(date)`, `get(id)`, `create(dto)`, `update(id, dto)`, `remove(id)`.
+- Toate cererile: `credentials: 'same-origin'`, `Content-Type: application/json`, header `X-CSRF-TOKEN` citit din meta.
+- Normalizare răspuns: aruncă `ApiError { status, message, fieldErrors }`; parsează `ProblemDetails` / `ValidationProblemDetails`.
+- La 401 → `window.location.href = '/Account/Login?returnUrl=/'`.
+
+---
+
+### T13 — Randare timeline (JS)
+**Fișiere:** `src/TimeBlocker.Web/wwwroot/js/timeline.js`
+
+**Dependențe:** T12
+
+**Logică:**
+- Scală: 1 minut = 1px (o oră = 60px, ziua = 1440px). Valoarea scalei într-o constantă unică.
+- `render(container, blocks)`: șterge block-urile existente; pentru fiecare block creează element absolut poziționat: `top = minuteStart`, `height = max(durată, 20)`. Afișează titlul și intervalul `HH:mm–HH:mm`; dacă înălțimea ≥ 45px afișează și primul rând din notițe (trunchiat).
+- Tot textul se inserează cu `textContent` (fără `innerHTML` pentru date de utilizator — protecție XSS).
+- Click pe block → emite eveniment custom `block:select` cu `id`.
+- Click pe zonă goală a timeline-ului → emite `slot:select` cu ora rotunjită în jos la 30 min (pre-completează formularul de adăugare, durată implicită 60 min, limitată la 23:59).
+- Linia orei curente (roșie) vizibilă doar când data afișată = ziua curentă din browser; actualizată la fiecare 60s.
+- La încărcarea zilei curente: scroll automat la (ora curentă − 1h).
+- Funcție utilitară `linkify(text)` → `DocumentFragment`: text simplu cu `TextNode`, iar URL-urile `http(s)://` devin `<a target="_blank" rel="noopener noreferrer">`. Alte scheme (ex: `javascript:`) NU se transformă în link.
+
+---
+
+### T14 — Formular modal (JS)
+**Fișiere:** `src/TimeBlocker.Web/wwwroot/js/modal.js`
+
+**Dependențe:** T12, T13
+
+**Logică:**
+- `openCreate(prefill)` și `openEdit(block)`; un singur modal, mod setat prin atribut `data-mode`.
+- Validare client (oglindă a T06): titlu obligatoriu, end > start, notițe ≤ 5000 (contor de caractere vizibil). Validarea server rămâne sursa de adevăr.
+- Submit: dezactivează butonul pe durata cererii; apelează `create`/`update`; la succes închide modalul și emite `blocks:changed` cu data block-ului.
+- Erori 400 → afișate sub câmpurile corespunzătoare (clase Bootstrap `is-invalid` + `invalid-feedback`). Eroare 409 → alertă în modal cu mesajul serverului.
+- Șterge: `confirm('Ștergi acest interval?')` → `remove(id)` → închide → `blocks:changed`.
+- În editare, zona de notițe are și o previzualizare cu linkuri clickabile (via `linkify`).
+
+---
+
+### T15 — Orchestrare dashboard (JS)
+**Fișiere:** `src/TimeBlocker.Web/wwwroot/js/dashboard.js`
+
+**Dependențe:** T12, T13, T14
+
+**Logică:**
+- Stare: `currentDate` (string `yyyy-MM-dd`, inițial data locală a browserului — P1). Sincronizată cu query string `?date=` prin `history.replaceState` (refresh păstrează ziua).
+- `loadDay()`: `api.list(currentDate)` → `timeline.render`; afișează stare de încărcare și stare goală („Niciun interval pentru această zi”).
+- Navigare zile: ‹ / Azi / ›.
+- Ascultă `block:select` → `api.get(id)` → `modal.openEdit`; `slot:select` și butonul „Adaugă” → `modal.openCreate`; `blocks:changed` → dacă data block-ului ≠ `currentDate`, mută `currentDate` pe acea dată; apoi `loadDay()`.
+- Formatarea datei afișate: `Intl.DateTimeFormat('ro-RO', { weekday:'long', day:'numeric', month:'long', year:'numeric' })`.
+
+---
+
+### T16 — Stiluri
+**Fișiere:** `src/TimeBlocker.Web/wwwroot/css/site.css`
+
+**Dependențe:** T11
+
+**Logică:**
+- Variabile CSS în `:root` pentru culori, înălțimea orei (60px) și raza colțurilor.
+- Timeline: coloană etichete ore (lățime fixă 56px) + coloană block-uri `position: relative`; linii orare subțiri, linii la jumătate de oră punctate.
+- Block: fundal colorat, bordură stânga accentuată, `overflow: hidden`, `cursor: pointer`, focus vizibil (accesibilitate).
+- Linia orei curente: 2px roșu, cu punct la stânga.
+- Mobil (< 768px): lățime completă, buton flotant „+” 56px fix `bottom: 24px; right: 24px`; modalul devine fullscreen (`modal-fullscreen-sm-down`).
+- Suport `prefers-color-scheme: dark` (variabile redefinite).
+
+---
+
+### T17 — Teste automate
+**Fișiere:** `tests/TimeBlocker.Tests/TestDbFactory.cs`, `tests/TimeBlocker.Tests/TimeBlockValidatorTests.cs`, `tests/TimeBlocker.Tests/TimeBlockServiceTests.cs`
+
+**Dependențe:** T06, T07
+
+**Logică:**
+- `TestDbFactory`: `SqliteConnection("DataSource=:memory:")` deschisă, `EnsureCreated()`, doi utilizatori de test (A și B).
+- Validator — cazuri obligatorii: titlu gol; titlu 121 caractere; dată invalidă; oră invalidă; end == start; end < start; minute non-multiplu de 5; notițe 5001 caractere; notițe doar spații → `null`; caz valid.
+- Serviciu — cazuri obligatorii:
+  - create + `GetByDateAsync` returnează sortat după `StartTime`;
+  - suprapunere → `Conflict`; capete care se ating → `Success`;
+  - update fără să se compare cu sine → `Success`;
+  - userul B nu poate citi/edita/șterge block-ul userului A → `NotFound`;
+  - suprapunerea între useri diferiți este permisă;
+  - delete inexistent → `NotFound`.
+- Rulare: `dotnet test` — 100% trecute.
+
+---
+
+### T18 — Documentație
+**Fișiere:** `README.md`
+
+**Dependențe:** toate
+
+**Logică:**
+- Cerințe: .NET 10 SDK, `dotnet-ef`.
+- Comenzi: `dotnet restore`, `dotnet ef database update --project src/TimeBlocker.Web`, `dotnet run --project src/TimeBlocker.Web`, `dotnet test`.
+- Locația bazei de date și cum se face backup (copiere fișier `.db` cu aplicația oprită).
+- Lista presupunerilor P1–P5 din secțiunea 0.
+
+## 3. Criterii de acceptanță MVP
+1. Un utilizator nou se poate înregistra, autentifica și deconecta.
+2. Accesul neautentificat la `/` redirecționează la Login; la `/api/*` returnează 401.
+3. Pe dashboard, ziua curentă este afișată ca timeline 00:00–24:00 cu linia orei curente.
+4. Se pot adăuga, vizualiza, edita și șterge intervale (titlu, oră start/sfârșit, notițe) fără reîncărcarea paginii.
+5. Linkurile din notițe sunt clickabile și se deschid în tab nou; niciun conținut de utilizator nu este interpretat ca HTML.
+6. Utilizatorul A nu poate vedea sau modifica în niciun fel datele utilizatorului B.
+7. Interfața este utilizabilă pe un ecran de 375px lățime.
+8. `dotnet build` și `dotnet test` trec fără erori și fără avertismente de nullability.

@@ -1,0 +1,42 @@
+@page
+@model TimeBlocker.Web.Pages.Account.LoginModel
+@{
+    ViewData["Title"] = "Autentificare";
+}
+
+<div class="row justify-content-center">
+    <div class="col-12 col-sm-10 col-md-7 col-lg-5">
+        <div class="card shadow-sm">
+            <div class="card-body p-4">
+                <h1 class="h4 mb-3">Autentificare</h1>
+
+                <form method="post" asp-route-returnUrl="@Model.ReturnUrl" novalidate>
+                    <div asp-validation-summary="ModelOnly" class="alert alert-danger py-2 small" role="alert"></div>
+
+                    <div class="mb-3">
+                        <label asp-for="Input.Email" class="form-label"></label>
+                        <input asp-for="Input.Email" class="form-control" autocomplete="username" autofocus />
+                        <span asp-validation-for="Input.Email" class="text-danger small"></span>
+                    </div>
+
+                    <div class="mb-3">
+                        <label asp-for="Input.Password" class="form-label"></label>
+                        <input asp-for="Input.Password" class="form-control" autocomplete="current-password" />
+                        <span asp-validation-for="Input.Password" class="text-danger small"></span>
+                    </div>
+
+                    <div class="form-check mb-3">
+                        <input asp-for="Input.RememberMe" class="form-check-input" />
+                        <label asp-for="Input.RememberMe" class="form-check-label"></label>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary w-100">Autentificare</button>
+                </form>
+
+                <p class="mt-3 mb-0 small text-center">
+                    Nu ai cont? <a asp-page="/Account/Register">Înregistrează-te</a>
+                </p>
+            </div>
+        </div>
+    </div>
+</div>

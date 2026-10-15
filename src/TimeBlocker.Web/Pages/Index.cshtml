@@ -1,0 +1,116 @@
+﻿@page
+@model IndexModel
+@inject Microsoft.AspNetCore.Antiforgery.IAntiforgery Antiforgery
+@{
+    ViewData["Title"] = "Calendar";
+    ViewData["MainClass"] = "container-fluid dashboard py-3";
+}
+
+@section Head {
+    <meta name="csrf-token" content="@Antiforgery.GetAndStoreTokens(HttpContext).RequestToken" />
+}
+
+<div class="day-toolbar d-flex flex-wrap align-items-center gap-2 mb-3">
+    <div class="btn-group" role="group" aria-label="Navigare zile">
+        <button type="button" class="btn btn-outline-secondary" id="prevDay" aria-label="Ziua anterioară">&lsaquo;</button>
+        <button type="button" class="btn btn-outline-secondary" id="today">Azi</button>
+        <button type="button" class="btn btn-outline-secondary" id="nextDay" aria-label="Ziua următoare">&rsaquo;</button>
+    </div>
+    <h1 class="h5 mb-0 flex-grow-1 day-label" id="dayLabel" aria-live="polite">&nbsp;</h1>
+    <button type="button" class="btn btn-primary d-none d-md-inline-block" id="addBlock">Adaugă interval</button>
+</div>
+
+<div class="alert alert-danger d-none" id="dayError" role="alert"></div>
+
+<div class="timeline-wrapper border rounded" id="timelineWrapper">
+    <div class="timeline-status d-none" id="timelineStatus" role="status" aria-live="polite"></div>
+    <div class="timeline-grid">
+        <div class="timeline-hours" aria-hidden="true">
+            @for (var h = 0; h < 24; h++)
+            {
+                <div class="timeline-hour-label">@h.ToString("00"):00</div>
+            }
+        </div>
+        <div class="timeline" id="timeline" role="list" aria-label="Intervale programate">
+            @for (var h = 0; h < 24; h++)
+            {
+                <div class="timeline-row" data-hour="@h" aria-hidden="true"></div>
+            }
+        </div>
+    </div>
+</div>
+
+<button type="button" class="btn btn-primary fab d-md-none" id="addBlockFab" aria-label="Adaugă interval">+</button>
+
+<div class="modal fade" id="blockModal" tabindex="-1" aria-labelledby="blockModalTitle" aria-hidden="true" data-mode="create">
+    <div class="modal-dialog modal-dialog-scrollable modal-fullscreen-sm-down">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title fs-5" id="blockModalTitle">Interval nou</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Închide"></button>
+            </div>
+
+            <div class="modal-body">
+                <div class="alert alert-danger d-none" id="blockFormAlert" role="alert"></div>
+
+                <section class="block-view" id="blockView" aria-label="Detalii interval">
+                    <p class="block-view-time text-body-secondary mb-1" id="viewTime"></p>
+                    <h3 class="h5 block-view-title" id="viewTitle"></h3>
+                    <div class="block-view-notes" id="viewNotes"></div>
+                </section>
+
+                <form id="blockForm" novalidate>
+                    <div class="mb-3">
+                        <label for="fieldTitle" class="form-label">Titlu</label>
+                        <input type="text" class="form-control" id="fieldTitle" name="title" maxlength="120" required autocomplete="off" />
+                        <div class="invalid-feedback" data-error-for="title"></div>
+                    </div>
+
+                    <div class="mb-3">
+                        <label for="fieldDate" class="form-label">Data</label>
+                        <input type="date" class="form-control" id="fieldDate" name="date" required />
+                        <div class="invalid-feedback" data-error-for="date"></div>
+                    </div>
+
+                    <div class="row g-2 mb-3">
+                        <div class="col-6">
+                            <label for="fieldStart" class="form-label">Început</label>
+                            <input type="time" class="form-control" id="fieldStart" name="startTime" step="300" required />
+                            <div class="invalid-feedback" data-error-for="startTime"></div>
+                        </div>
+                        <div class="col-6">
+                            <label for="fieldEnd" class="form-label">Sfârșit</label>
+                            <input type="time" class="form-control" id="fieldEnd" name="endTime" step="300" required />
+                            <div class="invalid-feedback" data-error-for="endTime"></div>
+                        </div>
+                    </div>
+
+                    <div class="mb-2">
+                        <div class="d-flex justify-content-between align-items-baseline">
+                            <label for="fieldNotes" class="form-label">Notițe</label>
+                            <small class="text-body-secondary" id="notesCounter" aria-live="polite">0 / 5000</small>
+                        </div>
+                        <textarea class="form-control" id="fieldNotes" name="notes" rows="6" maxlength="5000"></textarea>
+                        <div class="invalid-feedback" data-error-for="notes"></div>
+                    </div>
+
+                    <div class="notes-preview-wrapper d-none" id="notesPreviewWrapper">
+                        <div class="small text-body-secondary mb-1">Previzualizare</div>
+                        <div class="notes-preview border rounded p-2" id="notesPreview"></div>
+                    </div>
+                </form>
+            </div>
+
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-danger me-auto" id="deleteBlock">Șterge</button>
+                <button type="button" class="btn btn-outline-secondary" id="editBlock">Editează</button>
+                <button type="button" class="btn btn-secondary" id="cancelBlock" data-bs-dismiss="modal">Anulează</button>
+                <button type="submit" class="btn btn-primary" id="saveBlock" form="blockForm">Salvează</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+@section Scripts {
+    <script type="module" src="~/js/dashboard.js" asp-append-version="true"></script>
+}
